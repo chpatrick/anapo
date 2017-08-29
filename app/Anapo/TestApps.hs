@@ -6,8 +6,8 @@
 module Anapo.TestApps (TestAppsState, testAppsComponent, testAppsInit) where
 
 import Control.Applicative
-import Control.Lens (makeLenses, set, (^.), traverseOf, Lens', forOf_, folded)
-import Control.Monad (forM_, guard)
+import Control.Lens (makeLenses, set, (^.), Lens', forOf_, folded)
+import Control.Monad (guard)
 import Data.IORef
 import Data.Maybe
 import qualified Data.JSString as JSString
@@ -33,12 +33,15 @@ import qualified GHCJS.DOM.Location as DOM
 import qualified GHCJS.DOM.Window as DOM
 
 class Router r where
-  tryRoute :: [ JSString.JSString ] -> Maybe (r state -> Component' state)
-  default tryRoute :: (Generic1 r, Router (Rep1 r)) => [ JSString.JSString ] -> Maybe (r state -> Component' state)
-  tryRoute = tryRouteNext from1
-  zoomRoute :: Lens' out in_ -> r in_ -> r out
-  default zoomRoute :: (Generic1 r, Router (Rep1 r)) => Lens' out in_ -> r in_ -> r out
-  zoomRoute l = to1 . zoomRoute l . from1
+  type RouteState r :: *
+  tryRoute :: [ JSString.JSString ] -> Maybe (r -> Component' (RouteState r))
+  default tryRoute :: (Generic r, Router (Rep r ()), RouteState (Rep r ()) ~ RouteState r) => [ JSString.JSString ] -> Maybe (r -> Component' (RouteState r))
+  tryRoute = tryRouteNext (\router -> from router :: Rep r ())
+
+tryRouteNext :: Router r' => (r -> r') -> [ JSString.JSString ] -> Maybe (r -> Component' (RouteState r'))
+tryRouteNext f segs = do
+  routeNext <- tryRoute segs
+  return (routeNext . f)
 
 class Abbreviated a where
   type Brief a :: *
@@ -47,9 +50,13 @@ class Abbreviated a where
   default brief :: a -> a
   brief = id
 
-newtype Seg (seg :: Symbol) next state = Seg { segNext :: next state }
-newtype Capture a next state = Capture { captureNext :: a -> next state }
+newtype Seg (seg :: Symbol) next = Seg { segNext :: next }
+newtype Capture a next = Capture { captureNext :: a -> next }
 newtype End state = End { endComponent :: Component' state }
+data Zoom out next = Zoom
+  { zoomLens :: Lens' out (RouteState next)
+  , zoomNext :: next
+  }
 
 type a :> b = a b
 infixr 2 :>
@@ -57,39 +64,46 @@ infixr 2 :>
 type seg /> b = Seg seg b
 infixr 2 />
 
-tryRouteNext :: Router r' => (r state -> r' state) -> [ JSString.JSString ] -> Maybe (r state -> Component' state)
-tryRouteNext f path = do
-  routeNext <- tryRoute path
-  return (routeNext . f)
-
-instance Router End where
+instance Router (End state) where
+  type RouteState (End state) = state
   tryRoute segs = endComponent <$ guard (null segs)
-  zoomRoute l (End comp) = End (zoom' l comp)
 
 instance Abbreviated (End state) where
   type Brief (End state) = Component' state
   brief = End
 
 instance (KnownSymbol seg, Router next) => Router (Seg seg next) where
-  tryRoute segs =
-    case segs of
-      (s : nextPath) | JSString.unpack s == symbolVal (Proxy :: Proxy seg) -> tryRouteNext segNext nextPath
-      _ -> Nothing
-  zoomRoute l (Seg next) = Seg (zoomRoute l next)
+  type RouteState (Seg seg next) = RouteState next
+  tryRoute (s : nextPath)
+    | JSString.unpack s == symbolVal (Proxy :: Proxy seg) = tryRouteNext segNext nextPath
+  tryRoute _ = Nothing
 
-instance Abbreviated (next state) => Abbreviated (Seg seg next state) where
-  type Brief (Seg seg next state) = Brief (next state)
+instance Abbreviated next => Abbreviated (Seg seg next) where
+  type Brief (Seg seg next) = Brief next
   brief = Seg . brief
 
-deriving instance Router f => Router (Rec1 f)
-deriving instance Router f => Router (M1 i c f)
+instance Router next => Router (Zoom out next) where
+  type RouteState (Zoom out next) = out
+  tryRoute segs = do
+    routeNext <- tryRoute segs
+    return $ \(Zoom l next) -> zoom' l (routeNext next)
 
-instance (Router left, Router right) => Router (left :*: right) where
-  tryRoute req = routeLeft <|> routeRight
+instance Abbreviated next => Abbreviated (Zoom out next)
+
+instance Router r => Router (K1 i r p) where
+  type RouteState (K1 i r p) = RouteState r
+  tryRoute = tryRouteNext unK1
+
+instance Router (f p) => Router (M1 i c f p) where
+  type RouteState (M1 i c f p) = RouteState (f p)
+  tryRoute = tryRouteNext unM1
+
+instance (Router (left p), Router (right p), RouteState (left p) ~ RouteState (right p)) => Router ((left :*: right) p) where
+  type RouteState ((left :*: right) p) = RouteState (left p)
+  tryRoute segs = routeLeft <|> routeRight
     where
-      routeLeft = tryRouteNext (\(left :*: _) -> left) req
-      routeRight = tryRouteNext (\(_ :*: right) -> right) req
-  zoomRoute l (left :*: right) = zoomRoute l left :*: zoomRoute l right
+      routeLeft = tryRouteNext (\(left :*: _) -> left) segs
+      routeRight = tryRouteNext (\(_ :*: right) -> right) segs
 
 data RouterState state = RouterState
   { _routerMountState :: IORef (Maybe (IO ()))
@@ -107,7 +121,7 @@ routerInit initState = do
     , _routerInnerState = initState
     }
 
-routerComponent :: Router r => r state -> Component' (RouterState state)
+routerComponent :: Router r => r -> Component' (RouterState (RouteState r))
 routerComponent router = do
   dispatch <- askDispatch
   st <- askState
@@ -118,7 +132,7 @@ routerComponent router = do
         pathName <- DOM.getPathname loc
         let segs = dropWhile JSString.null $ JSString.splitOn "/" pathName
         putStrLn ("segs: " ++ show segs)
-        let mbComponent = ($ router) <$> tryRoute segs
+        let mbComponent = fmap ($ router) $ tryRoute segs
         putStrLn ("mbComponent: " ++ show (isJust mbComponent))
         dispatch (set routerCurrentComponent mbComponent)
 
@@ -164,19 +178,20 @@ data TestAppsState = TestAppsState
   }
 makeLenses ''TestAppsState
 
-data TestAppRoutes state = TestAppRoutes
-  { routesTodo :: ("todo" /> End) state
-  , routesTimer :: ("timer" /> End) state
-  , routesYoutube :: ("hogjowls" /> End) state
-  , routesBlank :: End state
-  } deriving (Generic1)
-instance Router TestAppRoutes
+data TestAppRoutes = TestAppRoutes
+  { routesTodo :: ("todo" /> Zoom TestAppsState :> End TodoState )
+  , routesTimer :: ("timer" /> Zoom TestAppsState :> End TimerState)
+  , routesYoutube :: ("hogjowls" /> Zoom TestAppsState :> End YouTubeState)
+  , routesBlank :: End TestAppsState
+  } deriving (Generic)
+instance Router TestAppRoutes where
+  type RouteState TestAppRoutes = TestAppsState
 
-testAppRoutes :: TestAppRoutes TestAppsState
+testAppRoutes :: TestAppRoutes
 testAppRoutes = TestAppRoutes
-  { routesTodo = zoomRoute tasTodo $ brief todoComponent
-  , routesTimer = zoomRoute tasTimer $ brief timerComponent
-  , routesYoutube = zoomRoute tasYouTube $ brief youTubeComponent
+  { routesTodo = brief $ Zoom tasTodo $ End todoComponent
+  , routesTimer = brief $ Zoom tasTimer $ End timerComponent
+  , routesYoutube = brief $ Zoom tasYouTube $ End youTubeComponent
   , routesBlank = brief (return ())
   }
 
