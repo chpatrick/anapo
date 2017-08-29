@@ -7,6 +7,8 @@ module Anapo.TestApps.Prelude
   ) where
 
 import Control.Monad.IO.Class as X (liftIO)
+import Data.Foldable as X
+import Data.Traversable as X
 import qualified Data.Text as T
 import Control.Monad as X (void)
 import Control.Concurrent as X (forkIO)
