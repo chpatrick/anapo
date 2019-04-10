@@ -12,7 +12,7 @@ import Control.Monad (void, when)
 import Data.Foldable (traverse_, for_)
 import Data.Time.Clock (getCurrentTime, diffUTCTime, NominalDiffTime)
 import Data.Monoid ((<>))
-import Control.Exception.Safe (throwIO, tryAsync, SomeException(..), bracket, finally, Exception, Typeable)
+import Control.Exception.Safe (throwIO, tryAsync, SomeException(..), bracket, finally, Exception, Typeable, fromException)
 import Control.Exception (BlockedIndefinitelyOnMVar)
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, readMVar)
 import Data.IORef (IORef, readIORef, atomicModifyIORef', newIORef, writeIORef)
@@ -25,6 +25,9 @@ import qualified Data.HashMap.Strict as HMS
 import GHC.Stack (CallStack, SrcLoc(..), getCallStack)
 import Control.Exception.Safe (try)
 import Data.List (foldl')
+import Language.Javascript.JSaddle.Exception
+import Language.Javascript.JSaddle.Object (jsg, js1)
+import Control.Lens ((^.))
 
 import qualified GHCJS.DOM as DOM
 import qualified GHCJS.DOM.Types as DOM
@@ -159,6 +162,9 @@ nodeLoop withState node shouldRethrow excComp injectMode root = do
         onErrRethrow :: V.RenderedNode -> SomeException -> DOM.JSM a
         onErrRethrow rendered err = do
           logError ("Got exception, will render it and rethrow: " <> pack (show err))
+          for_ (fromException err :: Maybe JSException) $ \(JSException jsEx) -> do
+            -- Print the JS exception to the console for debugging.
+            jsg ("console" :: Text) ^. js1 ("error" :: Text) jsEx
           vdom <- simpleNode () (excComp err)
           void (V.reconciliate rendered [] vdom)
           logError ("Just got exception and rendered, rethrowing: " <> pack (show err))
