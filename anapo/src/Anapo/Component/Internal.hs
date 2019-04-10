@@ -410,6 +410,10 @@ instance Monad (DomM dom ctx st) where
     y <- unDomM (mf x) acEnv acTrav anEnv ctx st dom
     return y
 
+instance (a ~ ()) => Semigroup.Semigroup (DomM dom ctx st a) where
+  {-# INLINE (<>) #-}
+  (<>) = mappend
+
 instance (a ~ ()) => Monoid (DomM dom ctx st a) where
   {-# INLINE mempty #-}
   mempty = return ()
