@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 -- | Note: we use 'Traversal' to keep a cursor to the
 -- write end of the state, but really we should use an
 -- "affine traversal" which guarantees we have either 0
@@ -32,6 +33,8 @@ import Data.Foldable (for_)
 import qualified Language.Javascript.JSaddle as JS
 import qualified Data.Semigroup as Semigroup
 import GHC.Prim (coerce)
+import Control.Monad.Fail
+import Prelude hiding (fail)
 
 import qualified Anapo.VDOM as V
 import Anapo.Logging
@@ -138,6 +141,9 @@ instance Monad (Action context state) where
     x <- unAction ma env trav
     unAction (mf x) env trav
 
+instance MonadFail (Action context state) where
+  fail = liftIO . fail
+
 instance MonadIO (Action context state) where
   {-# INLINE liftIO #-}
   liftIO m = Action (\_env _trav -> liftIO m)
@@ -240,6 +246,9 @@ instance Monad (DispatchM context0 state0 context state) where
   DispatchM mx >>= mf = DispatchM $ \compName ctx st1 -> do
     (x, st2) <- mx compName ctx st1
     unDispatchM (mf x) compName ctx st2
+
+instance MonadFail (DispatchM context0 state0 context state) where
+  fail = liftIO . fail
 
 instance MonadReader context (DispatchM context0 state0 context state) where
   {-# INLINE ask #-}
@@ -382,6 +391,9 @@ instance MonadIO (DomM dom ctx st) where
   liftIO m = DomM $ \_actEnv _acTrav _anEnv _ctx _st _dom -> do
     x <- liftIO m
     return x
+
+instance MonadFail (DomM dom ctx st) where
+  fail = liftIO . fail
 
 #if !defined(ghcjs_HOST_OS)
 instance JS.MonadJSM (DomM dom ctx st) where
